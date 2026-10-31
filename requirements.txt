@@ -1,0 +1,6 @@
+Pillow>=10.0
+numpy>=1.24
+Send2Trash>=1.8
+
+# Optional: enables ORB feature-matching verification for cropped/rotated scans.
+# opencv-python-headless>=4.8
