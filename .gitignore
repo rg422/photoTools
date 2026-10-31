@@ -9,3 +9,4 @@ dist/
 .imgdupe_quarantine/
 .vscode/
 .idea/
+*.spec
