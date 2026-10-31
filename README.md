@@ -1,4 +1,13 @@
-# Image Duplicate Finder
+# Photo Tools
+
+A small Windows desktop app with two tools, each on its own tab:
+
+- **Find duplicates** — finds near-duplicate images (below).
+- **Date from filename** — writes the date at the front of each file name into
+  the photo's metadata, so photo apps sort it chronologically
+  ([details](#date-from-filename)).
+
+## Find duplicates
 
 Finds near-duplicate images across a folder tree — rescans of the same picture,
 re-exports at different sizes, and lossy copies of a lossless master — then ranks
@@ -74,16 +83,40 @@ of which show a confirmation listing what is about to move and where.
 Signatures are cached in `%LOCALAPPDATA%\imgdupe\signatures.db`, keyed by path,
 size and modification time, so re-scanning a library is near instant.
 
+## Date from filename
+
+A GUI port of `oldTool/Set-PhotoDateFromFilename.ps1`. It reads a date prefix
+from each file name — `20020128 Oma-01.JPG`, `2002-01-28 …`, `2002_01_28 …`, with
+an optional time such as `20020128_134500 …` — and writes it into:
+
+- the EXIF **Date taken** field (JPEG, TIFF, HEIC), which every photo app sorts by;
+- the file's **Created** and **Modified** timestamps.
+
+Names without a time get 12:00, or another time you choose, or you can keep the
+file's existing time of day. Files are never renamed and the picture data is
+never re-encoded: the EXIF write goes through the Windows Property System, the
+same path File Explorer's Details tab uses, so a JPEG only grows by the ~1.4 KB
+metadata block.
+
+Press **Preview** first: it lists every image with the date it would write and
+changes nothing. **Apply dates...** then writes them. Files whose name has no
+date, or an impossible one such as `20020230`, are highlighted and left
+untouched. The report can be saved with **Export CSV...**.
+
+Cloud-only OneDrive placeholders cannot be written; make the folder "Always keep
+on this device" first.
+
 ## Tests
 
 ```bash
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The suite generates a synthetic library with known duplicates — a lossless
+`test_pipeline.py` generates a synthetic library with known duplicates — a lossless
 master, a downscaled lossy copy, a bordered "scan", a byte-identical pair and an
 unrelated photo — and asserts that grouping, keeper selection and the cache all
-behave.
+behave. `test_datestamp.py` covers file-name parsing, dry runs, problem files,
+file times (including pre-1970 dates) and a lossless EXIF write.
 
 ## Layout
 
@@ -96,4 +129,5 @@ behave.
 | `imgdupe/cache.py` | SQLite signature cache |
 | `imgdupe/engine.py` | scan orchestration, threading, progress |
 | `imgdupe/deleter.py` | recycle-bin and quarantine removal |
+| `imgdupe/datestamp.py` | file-name date parsing, EXIF Date taken and file-time writes |
 | `imgdupe/gui.py` | Tkinter interface |

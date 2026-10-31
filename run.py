@@ -1,4 +1,4 @@
-"""Launch the Image Duplicate Finder GUI."""
+"""Launch the Photo Tools GUI."""
 
 from imgdupe.gui import main
 

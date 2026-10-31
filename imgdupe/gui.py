@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import deleter, engine
+from . import datestamp, deleter, engine
 from .grouping import DuplicateGroup
 from .quality import Candidate
 
@@ -52,14 +52,8 @@ def open_file(path: str) -> None:
 
 
 class DuplicateFinderApp(ttk.Frame):
-    def __init__(self, master: tk.Tk) -> None:
+    def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, padding=8)
-        self.master.title("Image Duplicate Finder")
-        self.master.geometry("1280x820")
-        self.master.minsize(1000, 640)
-        self.grid(row=0, column=0, sticky="nsew")
-        master.rowconfigure(0, weight=1)
-        master.columnconfigure(0, weight=1)
 
         self.folder = tk.StringVar()
         self.sensitivity = tk.StringVar(value=engine.DEFAULT_SENSITIVITY)
@@ -480,6 +474,294 @@ class DuplicateFinderApp(ttk.Frame):
         self._refresh_summary()
 
 
+class DateStamperApp(ttk.Frame):
+    """Writes the YYYYMMDD date from each file name into Date taken and file times."""
+
+    COLUMNS = (
+        ("date", "Date", 140, "w"),
+        ("taken", "Date taken", 90, "center"),
+        ("times", "File times", 90, "center"),
+        ("status", "Status", 90, "center"),
+        ("note", "Note", 280, "w"),
+    )
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, padding=8)
+
+        self.folder = tk.StringVar()
+        self.recurse = tk.BooleanVar(value=False)
+        self.use_file_time = tk.BooleanVar(value=False)
+        self.time_text = tk.StringVar(value="12:00")
+        self.write_metadata = tk.BooleanVar(value=datestamp.metadata_available())
+        self.problems_only = tk.BooleanVar(value=False)
+        self.status = tk.StringVar(
+            value="Choose a folder and press Preview. Nothing changes until you press Apply."
+        )
+
+        self.report: datestamp.StampReport | None = None
+        self._shown: list[datestamp.StampResult] = []
+        self._events: queue.Queue = queue.Queue()
+        self._cancel = threading.Event()
+        self._worker: threading.Thread | None = None
+        self._running_dry = True
+
+        self._build_toolbar()
+        self._build_body()
+        self._build_footer()
+        self.after(100, self._drain_events)
+
+    # ------------------------------------------------------------------ setup
+
+    def _build_toolbar(self) -> None:
+        bar = ttk.Frame(self)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.columnconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=(0, 6))
+        ttk.Entry(bar, textvariable=self.folder).grid(row=0, column=1, sticky="ew")
+        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=6)
+        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=(6, 0))
+
+        options = ttk.Frame(bar)
+        options.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(options, text="When the name has no time:").pack(side="left")
+        ttk.Radiobutton(
+            options, text="use", variable=self.use_file_time, value=False, command=self._sync_time_entry,
+        ).pack(side="left", padx=(8, 2))
+        self.time_entry = ttk.Entry(options, textvariable=self.time_text, width=8)
+        self.time_entry.pack(side="left")
+        ttk.Radiobutton(
+            options, text="keep the file's current time of day", variable=self.use_file_time, value=True,
+            command=self._sync_time_entry,
+        ).pack(side="left", padx=(12, 0))
+
+        metadata = ttk.Checkbutton(
+            options, text='Write EXIF "Date taken"' if datestamp.metadata_available()
+            else 'EXIF "Date taken" needs Windows', variable=self.write_metadata,
+        )
+        if not datestamp.metadata_available():
+            metadata.state(["disabled"])
+        metadata.pack(side="left", padx=(24, 0))
+
+        buttons = ttk.Frame(bar)
+        buttons.grid(row=0, column=4, rowspan=2, padx=(12, 0), sticky="e")
+        self.preview_button = ttk.Button(buttons, text="Preview", command=lambda: self._start(dry_run=True))
+        self.preview_button.pack(fill="x")
+        self.apply_button = ttk.Button(buttons, text="Apply dates...", command=lambda: self._start(dry_run=False))
+        self.apply_button.pack(fill="x", pady=(4, 0))
+
+        self.progress = ttk.Progressbar(bar, mode="determinate")
+        self.progress.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        ttk.Label(bar, textvariable=self.status).grid(row=3, column=0, columnspan=5, sticky="w", pady=(4, 8))
+
+    def _build_body(self) -> None:
+        wrap = ttk.Frame(self)
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            wrap, columns=[c[0] for c in self.COLUMNS], show="tree headings", selectmode="browse",
+        )
+        self.tree.heading("#0", text="File")
+        self.tree.column("#0", width=360, minwidth=160, anchor="w")
+        for key, title, width, anchor in self.COLUMNS:
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=width, minwidth=60, anchor=anchor, stretch=key in ("note",))
+        self.tree.tag_configure(datestamp.UNREADABLE, background="#fff4cc")
+        self.tree.tag_configure(datestamp.ERROR, background="#ffd6d6")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.bind("<Double-Button-1>", self._open_selected)
+
+    def _build_footer(self) -> None:
+        footer = ttk.Frame(self)
+        footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        footer.columnconfigure(0, weight=1)
+
+        self.summary = ttk.Label(
+            footer, text="Files are never renamed and the picture data is never re-encoded.",
+        )
+        self.summary.grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            footer, text="Only files needing attention", variable=self.problems_only, command=self._fill_tree,
+        ).grid(row=0, column=1, padx=8)
+        self.csv_button = ttk.Button(footer, text="Export CSV...", command=self._export_csv, state="disabled")
+        self.csv_button.grid(row=0, column=2)
+
+    def _sync_time_entry(self) -> None:
+        self.time_entry.state(["disabled"] if self.use_file_time.get() else ["!disabled"])
+
+    def _choose_folder(self) -> None:
+        chosen = filedialog.askdirectory(title="Choose the folder of photos to date")
+        if chosen:
+            self.folder.set(chosen)
+
+    # ------------------------------------------------------------------- run
+
+    def _stamp_options(self, dry_run: bool) -> datestamp.StampOptions | None:
+        try:
+            time_of_day = datestamp.parse_time_of_day(self.time_text.get())
+        except ValueError as exc:
+            if not self.use_file_time.get():
+                messagebox.showwarning("Check the time", str(exc))
+                return None
+            time_of_day = datestamp.DEFAULT_TIME
+        return datestamp.StampOptions(
+            recurse=self.recurse.get(),
+            time_of_day=time_of_day,
+            use_file_time=self.use_file_time.get(),
+            write_metadata=self.write_metadata.get(),
+            dry_run=dry_run,
+        )
+
+    def _start(self, dry_run: bool) -> None:
+        if self._worker and self._worker.is_alive():
+            self._cancel.set()
+            self.status.set("Cancelling...")
+            return
+
+        root = self.folder.get().strip()
+        if not root or not os.path.isdir(root):
+            messagebox.showwarning("Pick a folder", "Choose an existing folder of photos.")
+            return
+        options = self._stamp_options(dry_run)
+        if options is None:
+            return
+        if not dry_run and not self._confirm_apply(root, options):
+            return
+
+        self._cancel = threading.Event()
+        self._running_dry = dry_run
+        self.progress.configure(value=0, maximum=100)
+        (self.preview_button if dry_run else self.apply_button).configure(text="Cancel")
+        (self.apply_button if dry_run else self.preview_button).state(["disabled"])
+
+        def work() -> None:
+            try:
+                report = datestamp.run(
+                    root, options,
+                    on_progress=lambda p: self._events.put(("progress", p)),
+                    cancel=self._cancel,
+                )
+                self._events.put(("result", report))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                self._events.put(("error", f"{type(exc).__name__}: {exc}"))
+
+        self._worker = threading.Thread(target=work, daemon=True)
+        self._worker.start()
+
+    def _confirm_apply(self, root: str, options: datestamp.StampOptions) -> bool:
+        files = datestamp.find_files(root, options.recurse)
+        dated = 0
+        for path in files:
+            try:
+                datestamp.date_from_name(os.path.basename(path))
+                dated += 1
+            except datestamp.UnreadableName:
+                pass
+        if not dated:
+            messagebox.showinfo("Nothing to do", "No image in this folder starts with a YYYYMMDD date.")
+            return False
+
+        what = 'Date taken and Created/Modified times' if options.write_metadata else 'Created/Modified times'
+        skipped = len(files) - dated
+        message = f"Write the date from the file name into the {what} of {plural(dated, 'image')} in\n{root}?"
+        if skipped:
+            message += f"\n\n{plural(skipped, 'file')} without a usable date will be left untouched."
+        message += "\n\nThis changes the files in place. Run Preview first if you have not checked it."
+        return messagebox.askyesno("Apply dates", message, icon="warning")
+
+    def _drain_events(self) -> None:
+        try:
+            while True:
+                kind, payload = self._events.get_nowait()
+                if kind == "progress":
+                    if payload.total:
+                        self.progress.configure(maximum=payload.total, value=payload.current)
+                        self.status.set(f"{payload.current}/{payload.total} - {payload.detail}")
+                    else:
+                        self.status.set(payload.detail)
+                elif kind == "result":
+                    self._finish()
+                    self._apply_report(payload)
+                elif kind == "error":
+                    self._finish()
+                    self.status.set("Failed.")
+                    messagebox.showerror("Date stamping failed", payload)
+        except queue.Empty:
+            pass
+        self.after(100, self._drain_events)
+
+    def _finish(self) -> None:
+        self.preview_button.configure(text="Preview")
+        self.apply_button.configure(text="Apply dates...")
+        self.preview_button.state(["!disabled"])
+        self.apply_button.state(["!disabled"])
+
+    def _apply_report(self, report: datestamp.StampReport) -> None:
+        self.report = report
+        self.progress.configure(value=self.progress["maximum"])
+        self._fill_tree()
+        self.csv_button.configure(state="normal" if report.results else "disabled")
+
+        ok, errors, unknown = (report.count(s) for s in (datestamp.OK, datestamp.ERROR, datestamp.UNREADABLE))
+        verb = "would be dated" if report.dry_run else "dated"
+        parts = [f"{plural(len(report.results), 'image')} examined", f"{ok} {verb}"]
+        if errors:
+            parts.append(f"{plural(errors, 'error')} while writing")
+        if unknown:
+            parts.append(f"{unknown} not interpretable")
+        self.summary.configure(text="  -  ".join(parts))
+
+        if report.cancelled:
+            self.status.set("Cancelled. Files already processed are listed below.")
+        elif not report.results:
+            self.status.set("No image files found in that folder.")
+        elif report.dry_run:
+            self.status.set("Preview only - nothing was changed. Press Apply dates... to write them.")
+        else:
+            self.status.set("Done. Highlighted rows were left untouched or failed; see the Note column.")
+
+    def _fill_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        if not self.report:
+            return
+        rows = self.report.problems if self.problems_only.get() else self.report.results
+        for index, r in enumerate(rows):
+            self.tree.insert(
+                "", "end", iid=str(index), text=r.file,
+                values=(r.date, r.date_taken, r.file_times, r.status, r.note),
+                tags=(r.status,),
+            )
+        self._shown = rows
+
+    def _open_selected(self, _event: object) -> None:
+        selection = self.tree.selection()
+        if selection:
+            open_file(self._shown[int(selection[0])].path)
+
+    def _export_csv(self) -> None:
+        if not self.report:
+            return
+        target = filedialog.asksaveasfilename(
+            title="Save report", defaultextension=".csv", initialfile="photo-dates.csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not target:
+            return
+        try:
+            datestamp.write_csv(self.report, target)
+        except OSError as exc:
+            messagebox.showerror("Could not save", str(exc))
+            return
+        self.status.set(f"Report saved to {target}")
+
+
 def main() -> None:
     root = tk.Tk()
     try:
@@ -491,8 +773,17 @@ def main() -> None:
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
-    app = DuplicateFinderApp(root)
-    app.mainloop()
+    root.title("Photo Tools")
+    root.geometry("1280x820")
+    root.minsize(1000, 640)
+    root.rowconfigure(0, weight=1)
+    root.columnconfigure(0, weight=1)
+
+    tabs = ttk.Notebook(root)
+    tabs.grid(row=0, column=0, sticky="nsew")
+    tabs.add(DuplicateFinderApp(tabs), text="Find duplicates")
+    tabs.add(DateStamperApp(tabs), text="Date from filename")
+    root.mainloop()
 
 
 if __name__ == "__main__":
