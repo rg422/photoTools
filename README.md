@@ -56,7 +56,7 @@ skipped, so a whole group can never be wiped out by accident.
 
 ## Download
 
-The easiest way to run it: download **PhotoTools.exe** from the
+The easiest way to run it: download the **PhotoTools exe** (named with its version, e.g. `PhotoTools-1.0.1.exe`) from the
 [latest release](https://github.com/rg422/photoTools/releases/latest) and
 double-click it. Nothing else needs installing. The exe is not code-signed, so
 the first time Windows SmartScreen may say "Windows protected your PC" — click
@@ -88,6 +88,12 @@ Select a group to review it. Members are shown best-quality-first with the
 suggested keeper ticked and the reason for the suggestion spelled out. Tick every
 file you want to keep; unticked files are the ones that get removed. Double-click
 a thumbnail, or use **Open** / **Folder**, to inspect a file before deciding.
+
+To keep every file in a group, press **Keep all - skip group**: it ticks them all
+and moves to the next group. The group list shows, for each group, the number
+of files, how many are marked to **Delete**, how many to **Keep**, and the space
+reclaimed; groups with nothing to delete are greyed out, and groups with nothing
+ticked (which are always skipped) are shown in red.
 
 Then either **Delete unkept in this group** or **Delete all unkept files**, both
 of which show a confirmation listing what is about to move and where.
@@ -141,7 +147,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 This installs PyInstaller (`requirements-build.txt`) into `.venv` and writes a
-single-file `dist\PhotoTools.exe` that runs without Python.
+single-file `dist\PhotoTools-<version>.exe` that runs without Python, named
+from `__version__` in `imgdupe/__init__.py`.
 
 ## Tests
 

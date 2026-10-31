@@ -121,8 +121,8 @@ class DuplicateFinderApp(ttk.Frame):
         # Place the divider once the panes have a real width. Setting it on a
         # timer could run before layout, when it clamps to 0 and hides the list.
         def place_sash(event: tk.Event) -> None:
-            if event.width > px(380) * 2:
-                panes.sashpos(0, px(380))
+            if event.width > px(470) * 2:
+                panes.sashpos(0, px(470))
                 panes.unbind("<Configure>")
 
         panes.bind("<Configure>", place_sash)
@@ -130,16 +130,23 @@ class DuplicateFinderApp(ttk.Frame):
         left = ttk.Frame(panes)
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
-        columns = ("files", "save", "kind")
+        columns = ("files", "delete", "keep", "save", "kind")
         self.tree = ttk.Treeview(left, columns=columns, show="tree headings", selectmode="browse")
         self.tree.heading("#0", text="Group")
         self.tree.heading("files", text="Files")
+        self.tree.heading("delete", text="Delete")
+        self.tree.heading("keep", text="Keep")
         self.tree.heading("save", text="Reclaim")
         self.tree.heading("kind", text="Match")
-        self.tree.column("#0", width=px(175), minwidth=px(110), anchor="w")
-        self.tree.column("files", width=px(45), minwidth=px(45), stretch=False, anchor="center")
+        self.tree.column("#0", width=px(150), minwidth=px(100), anchor="w")
+        for key, width in (("files", 45), ("delete", 55), ("keep", 45)):
+            self.tree.column(key, width=px(width), minwidth=px(width), stretch=False, anchor="center")
         self.tree.column("save", width=px(75), minwidth=px(75), stretch=False, anchor="e")
-        self.tree.column("kind", width=px(65), minwidth=px(65), stretch=False, anchor="center")
+        self.tree.column("kind", width=px(60), minwidth=px(60), stretch=False, anchor="center")
+        # Groups where nothing will be removed are greyed out.
+        self.tree.tag_configure("keep_all", foreground="gray50")
+        # Nothing ticked: the group is skipped on delete, so flag it.
+        self.tree.tag_configure("none_kept", foreground="#b00020")
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -177,6 +184,9 @@ class DuplicateFinderApp(ttk.Frame):
         actions = ttk.Frame(right)
         actions.grid(row=2, column=0, sticky="ew", pady=px((8, 0)))
         ttk.Button(actions, text="Reset to suggestion", command=self._reset_group).pack(side="left")
+        ttk.Button(
+            actions, text="Keep all - skip group", command=self._keep_all_in_group,
+        ).pack(side="left", padx=px((8, 0)))
         self.group_delete_button = ttk.Button(
             actions, text="Delete unkept in this group", command=self._delete_current_group, state="disabled",
         )
@@ -273,12 +283,7 @@ class DuplicateFinderApp(ttk.Frame):
         for index, group in enumerate(self.groups, start=1):
             for member in group.members:
                 self.keep_flags[member.path] = tk.BooleanVar(value=member is group.keeper)
-            self.tree.insert(
-                "", "end", iid=str(index - 1),
-                text=f"{index}. {group.keeper.name}",
-                values=(len(group.members), human_bytes(group.reclaimable_bytes),
-                        "exact" if group.exact else "similar"),
-            )
+            self.tree.insert("", "end", iid=str(index - 1), text=f"{index}. {group.keeper.name}")
 
         failures = f", {len(result.failed)} unreadable" if result.failed else ""
         self.status.set(
@@ -388,7 +393,21 @@ class DuplicateFinderApp(ttk.Frame):
     def _on_mousewheel(self, event: tk.Event) -> None:
         self.canvas.xview_scroll(-1 * (event.delta // 120), "units")
 
+    def _refresh_group_rows(self) -> None:
+        """Update every group's Delete / Keep / Reclaim figures from the tick boxes."""
+        for index, group in enumerate(self.groups):
+            doomed = self._files_to_delete(only=group)
+            kept = sum(1 for m in group.members if self.keep_flags[m.path].get())
+            tags = ("none_kept",) if not kept else ("keep_all",) if not doomed else ()
+            self.tree.item(
+                str(index), tags=tags,
+                values=(len(group.members), len(doomed), kept,
+                        human_bytes(sum(size for _p, size in doomed)),
+                        "exact" if group.exact else "similar"),
+            )
+
     def _refresh_summary(self) -> None:
+        self._refresh_group_rows()
         doomed = self._files_to_delete()
         total = sum(size for _p, size in doomed)
         self.summary.configure(
@@ -407,6 +426,20 @@ class DuplicateFinderApp(ttk.Frame):
                 continue  # never let a whole group be wiped out
             doomed.extend((m.path, m.size) for m in group.members if not self.keep_flags[m.path].get())
         return doomed
+
+    def _keep_all_in_group(self) -> None:
+        """Tick every file in the current group, then move on to the next group."""
+        if not self.current_group:
+            return
+        for member in self.current_group.members:
+            self.keep_flags[member.path].set(True)
+        self._refresh_summary()
+        index = self.groups.index(self.current_group)
+        if index + 1 < len(self.groups):
+            following = str(index + 1)
+            self.tree.selection_set(following)
+            self.tree.focus(following)
+            self.tree.see(following)
 
     def _reset_group(self) -> None:
         if not self.current_group:
@@ -483,12 +516,7 @@ class DuplicateFinderApp(ttk.Frame):
         self.groups = remaining
         self.tree.delete(*self.tree.get_children())
         for index, group in enumerate(self.groups, start=1):
-            self.tree.insert(
-                "", "end", iid=str(index - 1),
-                text=f"{index}. {group.keeper.name}",
-                values=(len(group.members), human_bytes(group.reclaimable_bytes),
-                        "exact" if group.exact else "similar"),
-            )
+            self.tree.insert("", "end", iid=str(index - 1), text=f"{index}. {group.keeper.name}")
         self.current_group = None
         self._render_cards(None)
         self._refresh_summary()
