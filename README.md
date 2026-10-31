@@ -140,6 +140,11 @@ before changing anything. A rename that would collide with an existing file, or
 with another file in the same batch, is marked CONFLICT and skipped, so nothing
 is ever overwritten. **Undo last rename** puts the original names back.
 
+Searching and renaming run in the background with a progress bar, so large
+trees of subfolders stay responsive; **Preview** turns into **Cancel** while a
+search or rename is running. A pop-up confirms when a rename or undo has
+finished, and when a Preview that took more than a couple of seconds is done.
+
 ## Building the exe
 
 ```bash
