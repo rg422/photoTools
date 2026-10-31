@@ -54,6 +54,16 @@ scores low even though its pixel count is high.
 directory layout. A group where you have not ticked anything to keep is always
 skipped, so a whole group can never be wiped out by accident.
 
+## Download
+
+The easiest way to run it: download **PhotoTools.exe** from the
+[latest release](https://github.com/rg422/photoTools/releases/latest) and
+double-click it. Nothing else needs installing. The exe is not code-signed, so
+the first time Windows SmartScreen may say "Windows protected your PC" — click
+**More info**, then **Run anyway**.
+
+To run from source instead, follow the setup below.
+
 ## Setup
 
 ```bash
@@ -123,6 +133,15 @@ never changed.
 before changing anything. A rename that would collide with an existing file, or
 with another file in the same batch, is marked CONFLICT and skipped, so nothing
 is ever overwritten. **Undo last rename** puts the original names back.
+
+## Building the exe
+
+```bash
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+This installs PyInstaller (`requirements-build.txt`) into `.venv` and writes a
+single-file `dist\PhotoTools.exe` that runs without Python.
 
 ## Tests
 
