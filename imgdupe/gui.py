@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import datestamp, deleter, engine, renamer
+from . import __version__, datestamp, deleter, engine, renamer
 from .grouping import DuplicateGroup
 from .quality import Candidate
 
@@ -1059,7 +1059,7 @@ def main() -> None:
     style.configure("TNotebook.Tab", font=button_font, padding=(px(14), px(6)))
     add_keep_checkbox_style(root, style, button_font)
 
-    root.title("Photo Tools")
+    root.title(f"Photo Tools {__version__}")
     left, top, right, bottom = work_area(root)
     # Leave room for the title bar and border, which the geometry excludes.
     width = min(px(1280), right - left - px(16))
