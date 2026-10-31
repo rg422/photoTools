@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
@@ -16,8 +17,19 @@ from . import datestamp, deleter, engine, renamer
 from .grouping import DuplicateGroup
 from .quality import Candidate
 
-THUMB_SIZE = (190, 190)
-CARD_WIDTH = 210
+THUMB_SIZE = (280, 280)
+CARD_WIDTH = 300
+
+# Pixel sizes in this module are written for a 100% (96 DPI) display; main()
+# sets SCALE from the real DPI so they grow with Windows display scaling.
+SCALE = 1.0
+
+
+def px(value):
+    """Scale a pixel size, or a tuple of them, to the display's DPI."""
+    if isinstance(value, tuple):
+        return tuple(px(v) for v in value)
+    return round(value * SCALE)
 
 
 def plural(count: int, noun: str) -> str:
@@ -53,7 +65,7 @@ def open_file(path: str) -> None:
 
 class DuplicateFinderApp(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, padding=8)
+        super().__init__(master, padding=px(8))
 
         self.folder = tk.StringVar()
         self.sensitivity = tk.StringVar(value=engine.DEFAULT_SENSITIVITY)
@@ -83,12 +95,12 @@ class DuplicateFinderApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=(0, 6))
+        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=px((0, 6)))
         entry = ttk.Entry(bar, textvariable=self.folder)
         entry.grid(row=0, column=1, sticky="ew")
-        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=6)
+        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=px(6))
 
-        ttk.Label(bar, text="Sensitivity:").grid(row=0, column=3, padx=(12, 6))
+        ttk.Label(bar, text="Sensitivity:").grid(row=0, column=3, padx=px((12, 6)))
         combo = ttk.Combobox(
             bar, textvariable=self.sensitivity, state="readonly", width=28,
             values=list(engine.SENSITIVITY_PRESETS),
@@ -96,16 +108,24 @@ class DuplicateFinderApp(ttk.Frame):
         combo.grid(row=0, column=4)
 
         self.scan_button = ttk.Button(bar, text="Scan", command=self._start_scan)
-        self.scan_button.grid(row=0, column=5, padx=(12, 0))
+        self.scan_button.grid(row=0, column=5, padx=px((12, 0)))
 
         self.progress = ttk.Progressbar(bar, mode="determinate")
-        self.progress.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 0))
-        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 8))
+        self.progress.grid(row=1, column=0, columnspan=6, sticky="ew", pady=px((8, 0)))
+        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=6, sticky="w", pady=px((4, 8)))
 
     def _build_body(self) -> None:
         panes = ttk.PanedWindow(self, orient="horizontal")
         panes.grid(row=1, column=0, sticky="nsew")
-        self.after(80, lambda: panes.sashpos(0, 380))
+
+        # Place the divider once the panes have a real width. Setting it on a
+        # timer could run before layout, when it clamps to 0 and hides the list.
+        def place_sash(event: tk.Event) -> None:
+            if event.width > px(380) * 2:
+                panes.sashpos(0, px(380))
+                panes.unbind("<Configure>")
+
+        panes.bind("<Configure>", place_sash)
 
         left = ttk.Frame(panes)
         left.rowconfigure(0, weight=1)
@@ -116,10 +136,10 @@ class DuplicateFinderApp(ttk.Frame):
         self.tree.heading("files", text="Files")
         self.tree.heading("save", text="Reclaim")
         self.tree.heading("kind", text="Match")
-        self.tree.column("#0", width=175, minwidth=110, anchor="w")
-        self.tree.column("files", width=45, minwidth=45, stretch=False, anchor="center")
-        self.tree.column("save", width=75, minwidth=75, stretch=False, anchor="e")
-        self.tree.column("kind", width=65, minwidth=65, stretch=False, anchor="center")
+        self.tree.column("#0", width=px(175), minwidth=px(110), anchor="w")
+        self.tree.column("files", width=px(45), minwidth=px(45), stretch=False, anchor="center")
+        self.tree.column("save", width=px(75), minwidth=px(75), stretch=False, anchor="e")
+        self.tree.column("kind", width=px(65), minwidth=px(65), stretch=False, anchor="center")
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -132,9 +152,9 @@ class DuplicateFinderApp(ttk.Frame):
         right.columnconfigure(0, weight=1)
 
         self.suggestion = ttk.Label(
-            right, text="Select a group to review it.", wraplength=820, justify="left",
+            right, text="Select a group to review it.", wraplength=px(820), justify="left",
         )
-        self.suggestion.grid(row=0, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.suggestion.grid(row=0, column=0, sticky="ew", padx=px(8), pady=px((0, 6)))
 
         canvas_wrap = ttk.Frame(right)
         canvas_wrap.grid(row=1, column=0, sticky="nsew")
@@ -155,17 +175,17 @@ class DuplicateFinderApp(ttk.Frame):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
 
         actions = ttk.Frame(right)
-        actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=2, column=0, sticky="ew", pady=px((8, 0)))
         ttk.Button(actions, text="Reset to suggestion", command=self._reset_group).pack(side="left")
         self.group_delete_button = ttk.Button(
             actions, text="Delete unkept in this group", command=self._delete_current_group, state="disabled",
         )
-        self.group_delete_button.pack(side="left", padx=8)
+        self.group_delete_button.pack(side="left", padx=px(8))
         panes.add(right, weight=3)
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self)
-        footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        footer.grid(row=2, column=0, sticky="ew", pady=px((8, 0)))
         footer.columnconfigure(0, weight=1)
 
         self.summary = ttk.Label(footer, text="")
@@ -175,7 +195,7 @@ class DuplicateFinderApp(ttk.Frame):
         check = ttk.Checkbutton(footer, text=recycle_label, variable=self.use_recycle_bin)
         if not deleter.recycle_bin_available():
             check.state(["disabled"])
-        check.grid(row=0, column=1, padx=8)
+        check.grid(row=0, column=1, padx=px(8))
 
         self.delete_all_button = ttk.Button(
             footer, text="Delete all unkept files...", command=self._delete_everything, state="disabled",
@@ -317,8 +337,8 @@ class DuplicateFinderApp(ttk.Frame):
 
     def _build_card(self, column: int, member: Candidate, is_suggested: bool, best_score: float) -> None:
         title = "SUGGESTED KEEP" if is_suggested else f"{member.quality.score / best_score * 100:.0f}% of best"
-        card = ttk.LabelFrame(self.cards, text=title, padding=6)
-        card.grid(row=0, column=column, padx=6, pady=6, sticky="n")
+        card = ttk.LabelFrame(self.cards, text=title, padding=px(6))
+        card.grid(row=0, column=column, padx=px(6), pady=px(6), sticky="n")
 
         thumb = self._thumbnail(member.path)
         holder = ttk.Label(card, image=thumb) if thumb else ttk.Label(card, text="(preview failed)", width=24)
@@ -327,8 +347,8 @@ class DuplicateFinderApp(ttk.Frame):
 
         ttk.Checkbutton(
             card, text="Keep this file", variable=self.keep_flags[member.path],
-            command=self._refresh_summary,
-        ).pack(anchor="w", pady=(6, 2))
+            command=self._refresh_summary, style="Keep.TCheckbutton",
+        ).pack(anchor="w", pady=px((8, 4)))
 
         detail = ttk.Frame(card)
         detail.pack(fill="x")
@@ -341,24 +361,24 @@ class DuplicateFinderApp(ttk.Frame):
         ]
         for i, text in enumerate(lines):
             ttk.Label(
-                detail, text=text, wraplength=CARD_WIDTH - 20, justify="left",
+                detail, text=text, wraplength=px(CARD_WIDTH - 20), justify="left",
                 font=("TkDefaultFont", 8) if i > 1 else ("TkDefaultFont", 9, "bold" if i == 0 else "normal"),
                 foreground="gray30" if i >= 3 else "",
             ).pack(anchor="w")
 
         buttons = ttk.Frame(card)
-        buttons.pack(fill="x", pady=(6, 0))
+        buttons.pack(fill="x", pady=px((6, 0)))
         ttk.Button(buttons, text="Open", width=7, command=lambda p=member.path: open_file(p)).pack(side="left")
-        ttk.Button(buttons, text="Folder", width=8, command=lambda p=member.path: open_in_explorer(p)).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Folder", width=8, command=lambda p=member.path: open_in_explorer(p)).pack(side="left", padx=px(4))
 
     def _thumbnail(self, path: str) -> ImageTk.PhotoImage | None:
         if path in self.thumbnails:
             return self.thumbnails[path]
         try:
             with Image.open(path) as img:
-                img.draft("RGB", THUMB_SIZE)
+                img.draft("RGB", px(THUMB_SIZE))
                 img = img.convert("RGB")
-                img.thumbnail(THUMB_SIZE, Image.Resampling.LANCZOS)
+                img.thumbnail(px(THUMB_SIZE), Image.Resampling.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
         except Exception:  # noqa: BLE001 - a broken preview must not break review
             return None
@@ -486,7 +506,7 @@ class DateStamperApp(ttk.Frame):
     )
 
     def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, padding=8)
+        super().__init__(master, padding=px(8))
 
         self.folder = tk.StringVar()
         self.recurse = tk.BooleanVar(value=False)
@@ -519,23 +539,23 @@ class DateStamperApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=(0, 6))
+        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=px((0, 6)))
         ttk.Entry(bar, textvariable=self.folder).grid(row=0, column=1, sticky="ew")
-        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=6)
-        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=px(6))
+        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=px((6, 0)))
 
         options = ttk.Frame(bar)
-        options.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        options.grid(row=1, column=0, columnspan=4, sticky="w", pady=px((8, 0)))
         ttk.Label(options, text="When the name has no time:").pack(side="left")
         ttk.Radiobutton(
             options, text="use", variable=self.use_file_time, value=False, command=self._sync_time_entry,
-        ).pack(side="left", padx=(8, 2))
+        ).pack(side="left", padx=px((8, 2)))
         self.time_entry = ttk.Entry(options, textvariable=self.time_text, width=8)
         self.time_entry.pack(side="left")
         ttk.Radiobutton(
             options, text="keep the file's current time of day", variable=self.use_file_time, value=True,
             command=self._sync_time_entry,
-        ).pack(side="left", padx=(12, 0))
+        ).pack(side="left", padx=px((12, 0)))
 
         metadata = ttk.Checkbutton(
             options, text='Write EXIF "Date taken"' if datestamp.metadata_available()
@@ -543,18 +563,18 @@ class DateStamperApp(ttk.Frame):
         )
         if not datestamp.metadata_available():
             metadata.state(["disabled"])
-        metadata.pack(side="left", padx=(24, 0))
+        metadata.pack(side="left", padx=px((24, 0)))
 
         buttons = ttk.Frame(bar)
-        buttons.grid(row=0, column=4, rowspan=2, padx=(12, 0), sticky="e")
+        buttons.grid(row=0, column=4, rowspan=2, padx=px((12, 0)), sticky="e")
         self.preview_button = ttk.Button(buttons, text="Preview", command=lambda: self._start(dry_run=True))
         self.preview_button.pack(fill="x")
         self.apply_button = ttk.Button(buttons, text="Apply dates...", command=lambda: self._start(dry_run=False))
-        self.apply_button.pack(fill="x", pady=(4, 0))
+        self.apply_button.pack(fill="x", pady=px((4, 0)))
 
         self.progress = ttk.Progressbar(bar, mode="determinate")
-        self.progress.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(8, 0))
-        ttk.Label(bar, textvariable=self.status).grid(row=3, column=0, columnspan=5, sticky="w", pady=(4, 8))
+        self.progress.grid(row=2, column=0, columnspan=5, sticky="ew", pady=px((8, 0)))
+        ttk.Label(bar, textvariable=self.status).grid(row=3, column=0, columnspan=5, sticky="w", pady=px((4, 8)))
 
     def _build_body(self) -> None:
         wrap = ttk.Frame(self)
@@ -566,10 +586,10 @@ class DateStamperApp(ttk.Frame):
             wrap, columns=[c[0] for c in self.COLUMNS], show="tree headings", selectmode="browse",
         )
         self.tree.heading("#0", text="File")
-        self.tree.column("#0", width=360, minwidth=160, anchor="w")
+        self.tree.column("#0", width=px(360), minwidth=px(160), anchor="w")
         for key, title, width, anchor in self.COLUMNS:
             self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, minwidth=60, anchor=anchor, stretch=key in ("note",))
+            self.tree.column(key, width=px(width), minwidth=px(60), anchor=anchor, stretch=key in ("note",))
         self.tree.tag_configure(datestamp.UNREADABLE, background="#fff4cc")
         self.tree.tag_configure(datestamp.ERROR, background="#ffd6d6")
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -580,7 +600,7 @@ class DateStamperApp(ttk.Frame):
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self)
-        footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        footer.grid(row=2, column=0, sticky="ew", pady=px((8, 0)))
         footer.columnconfigure(0, weight=1)
 
         self.summary = ttk.Label(
@@ -589,7 +609,7 @@ class DateStamperApp(ttk.Frame):
         self.summary.grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             footer, text="Only files needing attention", variable=self.problems_only, command=self._fill_tree,
-        ).grid(row=0, column=1, padx=8)
+        ).grid(row=0, column=1, padx=px(8))
         self.csv_button = ttk.Button(footer, text="Export CSV...", command=self._export_csv, state="disabled")
         self.csv_button.grid(row=0, column=2)
 
@@ -768,7 +788,7 @@ class RenameApp(ttk.Frame):
     PROBLEMS = (renamer.CONFLICT, renamer.INVALID, renamer.ERROR)
 
     def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, padding=8)
+        super().__init__(master, padding=px(8))
 
         self.folder = tk.StringVar()
         self.find_text = tk.StringVar()
@@ -795,31 +815,31 @@ class RenameApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=(0, 6), sticky="w")
+        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=px((0, 6)), sticky="w")
         ttk.Entry(bar, textvariable=self.folder).grid(row=0, column=1, sticky="ew")
-        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=6)
-        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=px(6))
+        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=px((6, 0)))
 
         terms = ttk.Frame(bar)
-        terms.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        terms.grid(row=1, column=0, columnspan=4, sticky="w", pady=px((8, 0)))
         ttk.Label(terms, text="Find:").pack(side="left")
         find_entry = ttk.Entry(terms, textvariable=self.find_text, width=22)
-        find_entry.pack(side="left", padx=(6, 12))
+        find_entry.pack(side="left", padx=px((6, 12)))
         ttk.Label(terms, text="Replace with:").pack(side="left")
         replace_entry = ttk.Entry(terms, textvariable=self.replace_text, width=22)
-        replace_entry.pack(side="left", padx=(6, 18))
+        replace_entry.pack(side="left", padx=px((6, 18)))
         for entry in (find_entry, replace_entry):
             entry.bind("<Return>", lambda _e: self._preview())
         ttk.Checkbutton(terms, text="Match case", variable=self.match_case).pack(side="left")
-        ttk.Checkbutton(terms, text="Whole word only", variable=self.whole_word).pack(side="left", padx=(12, 0))
-        ttk.Checkbutton(terms, text="Only image files", variable=self.images_only).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(terms, text="Whole word only", variable=self.whole_word).pack(side="left", padx=px((12, 0)))
+        ttk.Checkbutton(terms, text="Only image files", variable=self.images_only).pack(side="left", padx=px((12, 0)))
 
         buttons = ttk.Frame(bar)
-        buttons.grid(row=0, column=4, rowspan=2, padx=(12, 0), sticky="e")
+        buttons.grid(row=0, column=4, rowspan=2, padx=px((12, 0)), sticky="e")
         ttk.Button(buttons, text="Preview", command=self._preview).pack(fill="x")
-        ttk.Button(buttons, text="Rename...", command=self._rename).pack(fill="x", pady=(4, 0))
+        ttk.Button(buttons, text="Rename...", command=self._rename).pack(fill="x", pady=px((4, 0)))
 
-        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 8))
+        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=5, sticky="w", pady=px((8, 8)))
 
     def _build_body(self) -> None:
         wrap = ttk.Frame(self)
@@ -832,10 +852,10 @@ class RenameApp(ttk.Frame):
         self.tree.heading("new", text="New name")
         self.tree.heading("status", text="Status")
         self.tree.heading("note", text="Note")
-        self.tree.column("#0", width=380, minwidth=160, anchor="w")
-        self.tree.column("new", width=320, minwidth=160, anchor="w")
-        self.tree.column("status", width=100, minwidth=80, stretch=False, anchor="center")
-        self.tree.column("note", width=260, minwidth=100, anchor="w")
+        self.tree.column("#0", width=px(380), minwidth=px(160), anchor="w")
+        self.tree.column("new", width=px(320), minwidth=px(160), anchor="w")
+        self.tree.column("status", width=px(100), minwidth=px(80), stretch=False, anchor="center")
+        self.tree.column("note", width=px(260), minwidth=px(100), anchor="w")
         for status in self.PROBLEMS:
             self.tree.tag_configure(status, background="#ffd6d6")
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -845,7 +865,7 @@ class RenameApp(ttk.Frame):
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self)
-        footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        footer.grid(row=2, column=0, sticky="ew", pady=px((8, 0)))
         footer.columnconfigure(0, weight=1)
         self.summary = ttk.Label(
             footer, text="Only the name changes: Created/Modified dates and photo metadata are left exactly as they are.",
@@ -951,20 +971,103 @@ class RenameApp(ttk.Frame):
         )
 
 
+def _tick_box_image(size: int, checked: bool, hover: bool) -> Image.Image:
+    """A tick box drawn at 4x and downsampled, with a gap on the right before the label."""
+    from PIL import ImageDraw
+
+    k = 4
+    box = size * k
+    img = Image.new("RGBA", ((size + px(8)) * k, box), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    blue = (0, 95, 184, 255) if not hover else (0, 120, 215, 255)
+    inset, radius = k * 2, box // 6
+    if checked:
+        draw.rounded_rectangle((inset, inset, box - inset, box - inset), radius, fill=blue)
+        draw.line(
+            [(box * 0.25, box * 0.52), (box * 0.43, box * 0.70), (box * 0.76, box * 0.32)],
+            fill=(255, 255, 255, 255), width=max(k * 2, box // 9), joint="curve",
+        )
+    else:
+        edge = blue if hover else (90, 90, 90, 255)
+        draw.rounded_rectangle((inset, inset, box - inset, box - inset), radius,
+                               fill=(255, 255, 255, 255), outline=edge, width=max(k, box // 14))
+    return img.resize((img.width // k, size), Image.Resampling.LANCZOS)
+
+
+def add_keep_checkbox_style(root: tk.Tk, style: ttk.Style, font: tkfont.Font) -> None:
+    """``Keep.TCheckbutton``: a large tick box, since the theme's is fixed at a few pixels."""
+    size = px(26)
+    images = {
+        (checked, hover): ImageTk.PhotoImage(_tick_box_image(size, checked, hover), master=root)
+        for checked in (False, True) for hover in (False, True)
+    }
+    root._keep_tick_images = images  # Tk does not hold a reference itself
+    style.element_create(
+        "Keep.indicator", "image", images[(False, False)],
+        ("selected", "active", images[(True, True)]),
+        ("selected", images[(True, False)]),
+        ("active", images[(False, True)]),
+    )
+    style.layout("Keep.TCheckbutton", [
+        ("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Keep.indicator", {"side": "left", "sticky": ""}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                ("Checkbutton.label", {"sticky": "nswe"}),
+            ]}),
+        ]}),
+    ])
+    style.configure("Keep.TCheckbutton", font=font)
+
+
+def work_area(root: tk.Tk) -> tuple[int, int, int, int]:
+    """The desktop area not covered by the taskbar, as (left, top, right, bottom)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:  # noqa: BLE001 - non-Windows
+        pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight() - px(60)
+
+
 def main() -> None:
-    root = tk.Tk()
+    global SCALE
+    # Must happen before Tk starts: Tk reads the DPI once, at creation. Opting in
+    # afterwards leaves Tk sized for 96 DPI on a scaled display, so the whole
+    # window renders too small.
     try:
         from ctypes import windll
 
         windll.shcore.SetProcessDpiAwareness(1)
     except Exception:  # noqa: BLE001 - non-Windows or older Windows
         pass
+    root = tk.Tk()
+    SCALE = max(1.0, root.winfo_fpixels("1i") / 96)
+
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
+    linespace = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+    style.configure("Treeview", rowheight=linespace + px(6))
+    # Larger, easier-to-hit buttons and tabs.
+    button_font = tkfont.nametofont("TkDefaultFont").copy()
+    button_font.configure(size=11)
+    style.configure("TButton", font=button_font, padding=(px(12), px(6)))
+    style.configure("TNotebook.Tab", font=button_font, padding=(px(14), px(6)))
+    add_keep_checkbox_style(root, style, button_font)
+
     root.title("Photo Tools")
-    root.geometry("1280x820")
-    root.minsize(1000, 640)
+    left, top, right, bottom = work_area(root)
+    # Leave room for the title bar and border, which the geometry excludes.
+    width = min(px(1280), right - left - px(16))
+    height = min(px(820), bottom - top - px(48))
+    x = left + (right - left - width) // 2
+    y = top + max(0, (bottom - top - height - px(40)) // 2)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    root.minsize(min(px(1000), width), min(px(640), height))
     root.rowconfigure(0, weight=1)
     root.columnconfigure(0, weight=1)
 
