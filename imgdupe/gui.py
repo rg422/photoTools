@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import datestamp, deleter, engine
+from . import datestamp, deleter, engine, renamer
 from .grouping import DuplicateGroup
 from .quality import Candidate
 
@@ -762,6 +762,195 @@ class DateStamperApp(ttk.Frame):
         self.status.set(f"Report saved to {target}")
 
 
+class RenameApp(ttk.Frame):
+    """Replaces a term in file names. Only the name changes - never times or metadata."""
+
+    PROBLEMS = (renamer.CONFLICT, renamer.INVALID, renamer.ERROR)
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, padding=8)
+
+        self.folder = tk.StringVar()
+        self.find_text = tk.StringVar()
+        self.replace_text = tk.StringVar()
+        self.recurse = tk.BooleanVar(value=False)
+        self.match_case = tk.BooleanVar(value=True)
+        self.whole_word = tk.BooleanVar(value=False)
+        self.images_only = tk.BooleanVar(value=True)
+        self.status = tk.StringVar(
+            value='Enter a term to find, e.g. "Bday", and what to replace it with, then press Preview.'
+        )
+
+        self.items: list[renamer.RenameItem] = []
+        self.last_applied: list[renamer.RenameItem] = []
+
+        self._build_toolbar()
+        self._build_body()
+        self._build_footer()
+
+    def _build_toolbar(self) -> None:
+        bar = ttk.Frame(self)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.columnconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        ttk.Label(bar, text="Folder:").grid(row=0, column=0, padx=(0, 6), sticky="w")
+        ttk.Entry(bar, textvariable=self.folder).grid(row=0, column=1, sticky="ew")
+        ttk.Button(bar, text="Browse...", command=self._choose_folder).grid(row=0, column=2, padx=6)
+        ttk.Checkbutton(bar, text="Include subfolders", variable=self.recurse).grid(row=0, column=3, padx=(6, 0))
+
+        terms = ttk.Frame(bar)
+        terms.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(terms, text="Find:").pack(side="left")
+        find_entry = ttk.Entry(terms, textvariable=self.find_text, width=22)
+        find_entry.pack(side="left", padx=(6, 12))
+        ttk.Label(terms, text="Replace with:").pack(side="left")
+        replace_entry = ttk.Entry(terms, textvariable=self.replace_text, width=22)
+        replace_entry.pack(side="left", padx=(6, 18))
+        for entry in (find_entry, replace_entry):
+            entry.bind("<Return>", lambda _e: self._preview())
+        ttk.Checkbutton(terms, text="Match case", variable=self.match_case).pack(side="left")
+        ttk.Checkbutton(terms, text="Whole word only", variable=self.whole_word).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(terms, text="Only image files", variable=self.images_only).pack(side="left", padx=(12, 0))
+
+        buttons = ttk.Frame(bar)
+        buttons.grid(row=0, column=4, rowspan=2, padx=(12, 0), sticky="e")
+        ttk.Button(buttons, text="Preview", command=self._preview).pack(fill="x")
+        ttk.Button(buttons, text="Rename...", command=self._rename).pack(fill="x", pady=(4, 0))
+
+        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 8))
+
+    def _build_body(self) -> None:
+        wrap = ttk.Frame(self)
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(wrap, columns=("new", "status", "note"), show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="Current name")
+        self.tree.heading("new", text="New name")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("note", text="Note")
+        self.tree.column("#0", width=380, minwidth=160, anchor="w")
+        self.tree.column("new", width=320, minwidth=160, anchor="w")
+        self.tree.column("status", width=100, minwidth=80, stretch=False, anchor="center")
+        self.tree.column("note", width=260, minwidth=100, anchor="w")
+        for status in self.PROBLEMS:
+            self.tree.tag_configure(status, background="#ffd6d6")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scroll.set)
+
+    def _build_footer(self) -> None:
+        footer = ttk.Frame(self)
+        footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        footer.columnconfigure(0, weight=1)
+        self.summary = ttk.Label(
+            footer, text="Only the name changes: Created/Modified dates and photo metadata are left exactly as they are.",
+        )
+        self.summary.grid(row=0, column=0, sticky="w")
+        self.undo_button = ttk.Button(footer, text="Undo last rename", command=self._undo, state="disabled")
+        self.undo_button.grid(row=0, column=1)
+
+    def _choose_folder(self) -> None:
+        chosen = filedialog.askdirectory(title="Choose the folder of files to rename")
+        if chosen:
+            self.folder.set(chosen)
+
+    # ------------------------------------------------------------------- run
+
+    def _plan(self) -> list[renamer.RenameItem] | None:
+        root = self.folder.get().strip()
+        if not root or not os.path.isdir(root):
+            messagebox.showwarning("Pick a folder", "Choose an existing folder.")
+            return None
+        options = renamer.RenameOptions(
+            find=self.find_text.get(),
+            replace=self.replace_text.get(),
+            match_case=self.match_case.get(),
+            whole_word=self.whole_word.get(),
+            recurse=self.recurse.get(),
+            images_only=self.images_only.get(),
+        )
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            return renamer.plan(root, options)
+        except ValueError as exc:
+            messagebox.showwarning("Check the terms", str(exc))
+            return None
+        finally:
+            self.configure(cursor="")
+
+    def _preview(self) -> None:
+        items = self._plan()
+        if items is None:
+            return
+        self._show(items)
+        ready = sum(1 for i in items if i.status == renamer.READY)
+        if not items:
+            self.status.set(f'No file name contains "{self.find_text.get()}".')
+        else:
+            self.status.set(f"Preview only - nothing was changed. {plural(ready, 'file')} will be renamed.")
+
+    def _rename(self) -> None:
+        items = self._plan()
+        if items is None:
+            return
+        self._show(items)
+        ready = [i for i in items if i.status == renamer.READY]
+        if not ready:
+            self.status.set("Nothing to rename.")
+            messagebox.showinfo("Nothing to do", "No file can be renamed with these terms.")
+            return
+
+        sample = "\n".join(f"{os.path.basename(i.path)}  ->  {i.new_name}" for i in ready[:10])
+        if len(ready) > 10:
+            sample += f"\n...and {len(ready) - 10} more"
+        blocked = len(items) - len(ready)
+        if blocked:
+            sample += f"\n\n{plural(blocked, 'file')} with a problem will be left alone."
+        if not messagebox.askyesno("Rename files", f"Rename {plural(len(ready), 'file')}?\n\n{sample}"):
+            return
+
+        renamer.apply(items)
+        self.last_applied = items
+        self._show(items)
+        done = sum(1 for i in items if i.status == renamer.RENAMED)
+        self.undo_button.configure(state="normal" if done else "disabled")
+        failed = sum(1 for i in items if i.status in self.PROBLEMS)
+        self.status.set(
+            f"Renamed {plural(done, 'file')}." + (f" {failed} could not be renamed; see the Note column." if failed else "")
+        )
+
+    def _undo(self) -> None:
+        renamed = [i for i in self.last_applied if i.status == renamer.RENAMED]
+        if not renamed or not messagebox.askyesno(
+            "Undo rename", f"Put {plural(len(renamed), 'file')} back to their original names?",
+        ):
+            return
+        renamer.undo(self.last_applied)
+        self._show(self.last_applied)
+        self.undo_button.configure(state="disabled")
+        undone = sum(1 for i in self.last_applied if i.status == renamer.UNDONE)
+        self.status.set(f"Restored {plural(undone, 'original name')}.")
+
+    def _show(self, items: list[renamer.RenameItem]) -> None:
+        self.items = items
+        self.tree.delete(*self.tree.get_children())
+        for index, item in enumerate(items):
+            self.tree.insert(
+                "", "end", iid=str(index), text=item.file,
+                values=(item.new_name, item.status, item.note), tags=(item.status,),
+            )
+        problems = sum(1 for i in items if i.status in self.PROBLEMS)
+        self.summary.configure(
+            text=f"{plural(len(items), 'matching file')}" + (f"  -  {problems} with a problem" if problems else "")
+        )
+
+
 def main() -> None:
     root = tk.Tk()
     try:
@@ -783,6 +972,7 @@ def main() -> None:
     tabs.grid(row=0, column=0, sticky="nsew")
     tabs.add(DuplicateFinderApp(tabs), text="Find duplicates")
     tabs.add(DateStamperApp(tabs), text="Date from filename")
+    tabs.add(RenameApp(tabs), text="Rename files")
     root.mainloop()
 
 

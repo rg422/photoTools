@@ -1,11 +1,13 @@
 # Photo Tools
 
-A small Windows desktop app with two tools, each on its own tab:
+A small Windows desktop app with three tools, each on its own tab:
 
 - **Find duplicates** — finds near-duplicate images (below).
 - **Date from filename** — writes the date at the front of each file name into
   the photo's metadata, so photo apps sort it chronologically
   ([details](#date-from-filename)).
+- **Rename files** — replaces a term in file names, e.g. `Bday` → `B-day`,
+  without touching dates or metadata ([details](#rename-files)).
 
 ## Find duplicates
 
@@ -106,6 +108,22 @@ untouched. The report can be saved with **Export CSV...**.
 Cloud-only OneDrive placeholders cannot be written; make the folder "Always keep
 on this device" first.
 
+## Rename files
+
+Replaces a term in file names — `20020128 Oma Bday-01.JPG` becomes
+`20020128 Oma B-day-01.JPG`. Only the name changes: the file's contents, its
+Created and Modified dates, EXIF and every other piece of metadata stay exactly
+as they were.
+
+Options: **Match case** (on by default), **Whole word only** (`Bday` but not
+`Bdays`), **Only image files** and **Include subfolders**. The file extension is
+never changed.
+
+**Preview** lists every matching file and its new name. **Rename...** asks
+before changing anything. A rename that would collide with an existing file, or
+with another file in the same batch, is marked CONFLICT and skipped, so nothing
+is ever overwritten. **Undo last rename** puts the original names back.
+
 ## Tests
 
 ```bash
@@ -117,6 +135,8 @@ master, a downscaled lossy copy, a bordered "scan", a byte-identical pair and an
 unrelated photo — and asserts that grouping, keeper selection and the cache all
 behave. `test_datestamp.py` covers file-name parsing, dry runs, problem files,
 file times (including pre-1970 dates) and a lossless EXIF write.
+`test_renamer.py` checks the replacement rules, conflicts, undo, and that a
+rename leaves contents, dates, attributes and EXIF unchanged.
 
 ## Layout
 
@@ -130,4 +150,5 @@ file times (including pre-1970 dates) and a lossless EXIF write.
 | `imgdupe/engine.py` | scan orchestration, threading, progress |
 | `imgdupe/deleter.py` | recycle-bin and quarantine removal |
 | `imgdupe/datestamp.py` | file-name date parsing, EXIF Date taken and file-time writes |
+| `imgdupe/renamer.py` | find-and-replace in file names, with conflict checks and undo |
 | `imgdupe/gui.py` | Tkinter interface |

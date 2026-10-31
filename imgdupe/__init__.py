@@ -1,3 +1,3 @@
-"""Photo tools: perceptual duplicate finder and file-name date stamper."""
+"""Photo tools: perceptual duplicate finder, file-name date stamper and renamer."""
 
 __version__ = "0.1.0"
