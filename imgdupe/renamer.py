@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 
+from .engine import Progress, ProgressCallback
 from .scanner import IMAGE_EXTENSIONS, SKIP_DIR_NAMES
 
 INVALID_NAME_CHARS = set('\\/:*?"<>|')
 
-READY, RENAMED, CONFLICT, INVALID, ERROR, UNDONE = (
-    "will rename", "renamed", "CONFLICT", "INVALID", "ERROR", "undone",
+READY, RENAMED, CONFLICT, INVALID, ERROR, UNDONE, CANCELLED = (
+    "will rename", "renamed", "CONFLICT", "INVALID", "ERROR", "undone", "not renamed",
 )
+
+# Seconds between progress reports, so a huge tree does not flood the UI.
+PROGRESS_INTERVAL = 0.1
 
 
 @dataclass(slots=True)
@@ -81,12 +87,47 @@ def _check_name(name: str) -> str:
     return ""
 
 
-def plan(root: str, options: RenameOptions) -> list[RenameItem]:
-    """Every file whose name contains the term, with its new name and any problem."""
+def plural(count: int, noun: str, many: str = "") -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {many or noun + 's'}"
+
+
+class _Throttle:
+    """Calls ``report`` at most every PROGRESS_INTERVAL seconds, unless forced."""
+
+    def __init__(self, report: ProgressCallback | None) -> None:
+        self.report = report
+        self.last = 0.0
+
+    def __call__(self, progress: Progress, force: bool = False) -> None:
+        now = time.monotonic()
+        if self.report and (force or now - self.last >= PROGRESS_INTERVAL):
+            self.last = now
+            self.report(progress)
+
+
+def plan(
+    root: str,
+    options: RenameOptions,
+    on_progress: ProgressCallback | None = None,
+    cancel: threading.Event | None = None,
+) -> list[RenameItem]:
+    """Every file whose name contains the term, with its new name and any problem.
+
+    If ``cancel`` is set part-way, the matches found so far are returned.
+    """
     validate(options)
     root = os.path.abspath(root)
+    report = _Throttle(on_progress)
     items: list[RenameItem] = []
+    folders = checked = 0
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _: None):
+        if cancel is not None and cancel.is_set():
+            break
+        folders += 1
+        checked += len(filenames)
+        report(Progress("search", detail=f"Searching {os.path.relpath(dirpath, root)} - "
+                                         f"{plural(folders, 'folder')}, {plural(checked, 'file')} checked, "
+                                         f"{plural(len(items), 'match', 'matches')}"))
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIR_NAMES and not d.startswith("$"))
         for filename in sorted(filenames, key=str.lower):
             if options.images_only and os.path.splitext(filename)[1].lower() not in IMAGE_EXTENSIONS:
@@ -114,11 +155,23 @@ def plan(root: str, options: RenameOptions) -> list[RenameItem]:
     return items
 
 
-def apply(items: list[RenameItem]) -> None:
-    """Rename every READY item in place, recording the outcome on each."""
-    for item in items:
-        if item.status != READY:
-            continue
+def apply(
+    items: list[RenameItem],
+    on_progress: ProgressCallback | None = None,
+    cancel: threading.Event | None = None,
+) -> None:
+    """Rename every READY item in place, recording the outcome on each.
+
+    If ``cancel`` is set part-way, the remaining items are marked CANCELLED.
+    """
+    report = _Throttle(on_progress)
+    ready = [i for i in items if i.status == READY]
+    for done, item in enumerate(ready, start=1):
+        if cancel is not None and cancel.is_set():
+            for rest in ready[done - 1:]:
+                rest.status, rest.note = CANCELLED, "cancelled before renaming"
+            break
+        report(Progress("rename", done, len(ready), os.path.basename(item.path)), force=done == len(ready))
         # os.rename overwrites on POSIX, so never rely on it to refuse.
         if os.path.exists(item.new_path) and not _same_file(item.path, item.new_path):
             item.status, item.note = CONFLICT, "a file with the new name appeared"
@@ -130,11 +183,12 @@ def apply(items: list[RenameItem]) -> None:
             item.status, item.note = ERROR, exc.strerror or str(exc)
 
 
-def undo(items: list[RenameItem]) -> None:
+def undo(items: list[RenameItem], on_progress: ProgressCallback | None = None) -> None:
     """Put every RENAMED item back under its original name."""
-    for item in reversed(items):
-        if item.status != RENAMED:
-            continue
+    report = _Throttle(on_progress)
+    renamed = [i for i in reversed(items) if i.status == RENAMED]
+    for done, item in enumerate(renamed, start=1):
+        report(Progress("undo", done, len(renamed), item.new_name), force=done == len(renamed))
         if os.path.exists(item.path) and not _same_file(item.path, item.new_path):
             item.status, item.note = ERROR, "original name is taken; left as renamed"
             continue

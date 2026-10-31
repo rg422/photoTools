@@ -6,6 +6,7 @@ import os
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -122,6 +123,31 @@ class RenameFilesTest(unittest.TestCase):
         self.assertEqual([i.status for i in items], [renamer.READY])
         renamer.apply(items)
         self.assertIn("Holiday.jpg", os.listdir(self.root))
+
+    def test_progress_is_reported(self) -> None:
+        reports = []
+        items = renamer.plan(str(self.root), RenameOptions("Bday", "B-day", recurse=True), reports.append)
+        self.assertTrue(reports and reports[0].phase == "search")
+        reports.clear()
+        renamer.apply(items, reports.append)
+        ready = sum(1 for i in items if i.status == renamer.RENAMED)
+        self.assertEqual((reports[-1].current, reports[-1].total), (ready, ready))
+
+    def test_cancelled_search_returns_without_renaming(self) -> None:
+        cancel = threading.Event()
+        cancel.set()
+        before = sorted(os.listdir(self.root))
+        self.assertEqual(renamer.plan(str(self.root), RenameOptions("Bday", "B-day"), cancel=cancel), [])
+        self.assertEqual(sorted(os.listdir(self.root)), before)
+
+    def test_cancelled_rename_marks_the_rest(self) -> None:
+        items = renamer.plan(str(self.root), RenameOptions("Bday", "B-day"))
+        cancel = threading.Event()
+        # Cancel as soon as the first file has been reported.
+        renamer.apply(items, lambda _p: cancel.set(), cancel)
+        statuses = [i.status for i in items if i.status != renamer.CONFLICT]
+        self.assertEqual(statuses, [renamer.RENAMED, renamer.CANCELLED])
+        self.assertTrue((self.root / "20020128 Oma Bday-02.JPG").exists())
 
     def test_undo(self) -> None:
         before = sorted(os.listdir(self.root))

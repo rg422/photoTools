@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
@@ -832,9 +833,14 @@ class RenameApp(ttk.Frame):
         self.items: list[renamer.RenameItem] = []
         self.last_applied: list[renamer.RenameItem] = []
 
+        self._events: queue.Queue = queue.Queue()
+        self._cancel = threading.Event()
+        self._worker: threading.Thread | None = None
+
         self._build_toolbar()
         self._build_body()
         self._build_footer()
+        self.after(100, self._drain_events)
 
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self)
@@ -864,10 +870,14 @@ class RenameApp(ttk.Frame):
 
         buttons = ttk.Frame(bar)
         buttons.grid(row=0, column=4, rowspan=2, padx=px((12, 0)), sticky="e")
-        ttk.Button(buttons, text="Preview", command=self._preview).pack(fill="x")
-        ttk.Button(buttons, text="Rename...", command=self._rename).pack(fill="x", pady=px((4, 0)))
+        self.preview_button = ttk.Button(buttons, text="Preview", command=self._preview)
+        self.preview_button.pack(fill="x")
+        self.rename_button = ttk.Button(buttons, text="Rename...", command=self._rename)
+        self.rename_button.pack(fill="x", pady=px((4, 0)))
 
-        ttk.Label(bar, textvariable=self.status).grid(row=2, column=0, columnspan=5, sticky="w", pady=px((8, 8)))
+        self.progress = ttk.Progressbar(bar, mode="determinate")
+        self.progress.grid(row=2, column=0, columnspan=5, sticky="ew", pady=px((8, 0)))
+        ttk.Label(bar, textvariable=self.status).grid(row=3, column=0, columnspan=5, sticky="w", pady=px((4, 8)))
 
     def _build_body(self) -> None:
         wrap = ttk.Frame(self)
@@ -909,11 +919,79 @@ class RenameApp(ttk.Frame):
 
     # ------------------------------------------------------------------- run
 
-    def _plan(self) -> list[renamer.RenameItem] | None:
+    # Searching and renaming run on a worker thread so a large tree of
+    # subfolders keeps the window responsive and shows progress.
+
+    def _busy(self) -> bool:
+        return bool(self._worker and self._worker.is_alive())
+
+    # A Preview that runs longer than this also gets a "finished" pop-up, since
+    # the user has likely looked away; quick ones just update the status line.
+    SLOW_SEARCH_SECONDS = 2.0
+
+    def _run(self, kind: str, job, then) -> None:
+        """Run ``job(report, cancel)`` on a worker, then ``then(result)`` on the UI thread."""
+        self._cancel = threading.Event()
+        self._then = then
+        self._started = time.monotonic()
+        self.preview_button.configure(text="Cancel")
+        self.rename_button.state(["disabled"])
+        self.undo_button.state(["disabled"])
+        if kind == "search":
+            self.progress.configure(mode="indeterminate", value=0)
+            self.progress.start(12)
+        else:
+            self.progress.configure(mode="determinate", value=0, maximum=100)
+
+        def work() -> None:
+            try:
+                result = job(lambda p: self._events.put(("progress", p)), self._cancel)
+                self._events.put(("done", result))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                self._events.put(("error", f"{type(exc).__name__}: {exc}"))
+
+        self._worker = threading.Thread(target=work, daemon=True)
+        self._worker.start()
+
+    def _drain_events(self) -> None:
+        try:
+            while True:
+                kind, payload = self._events.get_nowait()
+                if kind == "progress":
+                    if payload.total:
+                        self.progress.configure(maximum=payload.total, value=payload.current)
+                        self.status.set(f"{payload.current}/{payload.total} - {payload.detail}")
+                    else:
+                        self.status.set(payload.detail)
+                elif kind == "done":
+                    self._idle()
+                    self._then(payload)
+                elif kind == "error":
+                    self._idle()
+                    self.status.set("Failed.")
+                    messagebox.showerror("Rename failed", payload)
+        except queue.Empty:
+            pass
+        self.after(100, self._drain_events)
+
+    def _idle(self) -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=self.progress["maximum"])
+        self.preview_button.configure(text="Preview")
+        self.rename_button.state(["!disabled"])
+        has_undo = any(i.status == renamer.RENAMED for i in self.last_applied)
+        self.undo_button.state(["!disabled"] if has_undo else ["disabled"])
+
+    def _search(self, then) -> None:
+        """Find matching files in the background, then call ``then(items)``."""
+        if self._busy():
+            self._cancel.set()
+            self.status.set("Cancelling...")
+            return
         root = self.folder.get().strip()
         if not root or not os.path.isdir(root):
             messagebox.showwarning("Pick a folder", "Choose an existing folder.")
-            return None
+            return
         options = renamer.RenameOptions(
             find=self.find_text.get(),
             replace=self.replace_text.get(),
@@ -922,32 +1000,43 @@ class RenameApp(ttk.Frame):
             recurse=self.recurse.get(),
             images_only=self.images_only.get(),
         )
-        self.configure(cursor="watch")
-        self.update_idletasks()
         try:
-            return renamer.plan(root, options)
+            renamer.validate(options)
         except ValueError as exc:
             messagebox.showwarning("Check the terms", str(exc))
-            return None
-        finally:
-            self.configure(cursor="")
+            return
+        self.status.set("Searching...")
+        self._run(
+            "search", lambda report, cancel: renamer.plan(root, options, report, cancel),
+            lambda items: self._searched(items, then),
+        )
+
+    def _searched(self, items: list[renamer.RenameItem], then) -> None:
+        self._show(items)
+        if self._cancel.is_set():
+            self.status.set(f"Search cancelled - showing the {renamer.plural(len(items), 'match', 'matches')} found so far. "
+                            "Nothing was renamed.")
+            return
+        then(items)
 
     def _preview(self) -> None:
-        items = self._plan()
-        if items is None:
-            return
-        self._show(items)
+        self._search(self._previewed)
+
+    def _previewed(self, items: list[renamer.RenameItem]) -> None:
         ready = sum(1 for i in items if i.status == renamer.READY)
         if not items:
-            self.status.set(f'No file name contains "{self.find_text.get()}".')
+            message = f'No file name contains "{self.find_text.get()}".'
         else:
-            self.status.set(f"Preview only - nothing was changed. {plural(ready, 'file')} will be renamed.")
+            message = f"Preview only - nothing was changed. {plural(ready, 'file')} will be renamed."
+        self.status.set(message)
+        if time.monotonic() - self._started >= self.SLOW_SEARCH_SECONDS:
+            messagebox.showinfo("Preview complete", message)
 
     def _rename(self) -> None:
-        items = self._plan()
-        if items is None:
-            return
-        self._show(items)
+        if not self._busy():
+            self._search(self._confirm_rename)
+
+    def _confirm_rename(self, items: list[renamer.RenameItem]) -> None:
         ready = [i for i in items if i.status == renamer.READY]
         if not ready:
             self.status.set("Nothing to rename.")
@@ -961,29 +1050,51 @@ class RenameApp(ttk.Frame):
         if blocked:
             sample += f"\n\n{plural(blocked, 'file')} with a problem will be left alone."
         if not messagebox.askyesno("Rename files", f"Rename {plural(len(ready), 'file')}?\n\n{sample}"):
+            self.status.set("Nothing was renamed.")
             return
 
-        renamer.apply(items)
+        self.status.set("Renaming...")
+        self._run(
+            "rename", lambda report, cancel: renamer.apply(items, report, cancel),
+            lambda _r: self._renamed(items),
+        )
+
+    def _renamed(self, items: list[renamer.RenameItem]) -> None:
         self.last_applied = items
         self._show(items)
+        self._idle()  # refresh Undo now that last_applied is set
         done = sum(1 for i in items if i.status == renamer.RENAMED)
-        self.undo_button.configure(state="normal" if done else "disabled")
         failed = sum(1 for i in items if i.status in self.PROBLEMS)
-        self.status.set(
-            f"Renamed {plural(done, 'file')}." + (f" {failed} could not be renamed; see the Note column." if failed else "")
-        )
+        skipped = sum(1 for i in items if i.status == renamer.CANCELLED)
+        message = f"Renamed {plural(done, 'file')}."
+        if skipped:
+            message += f" Cancelled - {plural(skipped, 'file')} not renamed."
+        if failed:
+            message += f" {failed} could not be renamed; see the Note column."
+        self.status.set(message)
+        if failed:
+            messagebox.showwarning("Rename finished with problems", message)
+        else:
+            messagebox.showinfo("Rename complete", message)
 
     def _undo(self) -> None:
         renamed = [i for i in self.last_applied if i.status == renamer.RENAMED]
-        if not renamed or not messagebox.askyesno(
+        if self._busy() or not renamed or not messagebox.askyesno(
             "Undo rename", f"Put {plural(len(renamed), 'file')} back to their original names?",
         ):
             return
-        renamer.undo(self.last_applied)
+        self.status.set("Restoring original names...")
+        self._run(
+            "undo", lambda report, _cancel: renamer.undo(self.last_applied, report),
+            lambda _r: self._undone(),
+        )
+
+    def _undone(self) -> None:
         self._show(self.last_applied)
-        self.undo_button.configure(state="disabled")
+        self._idle()
         undone = sum(1 for i in self.last_applied if i.status == renamer.UNDONE)
         self.status.set(f"Restored {plural(undone, 'original name')}.")
+        messagebox.showinfo("Undo complete", self.status.get())
 
     def _show(self, items: list[renamer.RenameItem]) -> None:
         self.items = items
